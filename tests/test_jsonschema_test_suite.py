@@ -1,117 +1,190 @@
-import json
-import os
-import subprocess
-import textwrap
-import unittest
+"""
+Test runner for the JSON Schema official test suite
 
-import jsonschemax
+Tests comprehensive correctness of each draft's validator.
 
-ROOT_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SUITE_PATH = os.path.join(ROOT_PATH, "tests", "JSON-Schema-Test-Suite")
+See https://github.com/json-schema-org/JSON-Schema-Test-Suite for details.
+"""
+
+import sys
+import warnings
+
+from jsonschema import (
+    Draft3Validator,
+    Draft4Validator,
+    Draft6Validator,
+    Draft7Validator,
+    draft3_format_checker,
+    draft4_format_checker,
+    draft6_format_checker,
+    draft7_format_checker,
+)
+from jsonschema.tests._suite import Suite
+from jsonschema.validators import _DEPRECATED_DEFAULT_TYPES, create
 
 
-def run(cmd, check=True, shell=True):
-    subprocess.run(cmd, check=check, shell=shell)
+SUITE = Suite()
+DRAFT3 = SUITE.version(name="draft3")
+DRAFT4 = SUITE.version(name="draft4")
+DRAFT6 = SUITE.version(name="draft6")
+DRAFT7 = SUITE.version(name="draft7")
 
 
-def download_suite():
-    if not os.path.isdir(SUITE_PATH):
-        run(
-            "git clone https://github.com/json-schema-org/JSON-Schema-Test-Suite.git "
-            + SUITE_PATH
+def skip_tests_containing_descriptions(**kwargs):
+    def skipper(test):
+        descriptions_and_reasons = kwargs.get(test.subject, {})
+        return next(
+            (
+                reason
+                for description, reason in descriptions_and_reasons.items()
+                if description in test.description
+            ),
+            None,
         )
 
-
-def load_jsons(version):
-    assert isinstance(version, str) and version.startswith("draft")
-
-    draft7dir = os.path.join(SUITE_PATH, "tests", version)  # not include optional json
-
-    for filename in os.listdir(draft7dir):
-        if filename.endswith("json"):
-            json_path = os.path.join(draft7dir, filename)
-            with open(json_path) as f:
-                yield json_path, json.loads(f.read())
+    return skipper
 
 
-def load_remote_schemas():
-    remotes_dir_path = os.path.join(SUITE_PATH, "remotes")
-    for (dirpath, dirnames, filenames) in os.walk(remotes_dir_path):
-        for filename in filenames:
-            json_file_path = os.path.join(dirpath, filename)
-            with open(json_file_path) as f:
-                yield (
-                    os.path.relpath(json_file_path, remotes_dir_path),
-                    json.loads(f.read()),
-                )
+def missing_format(checker):
+    def missing_format(test):
+        schema = test.schema
+        if schema is True or schema is False or "format" not in schema:
+            return
+
+        if schema["format"] not in checker.checkers:
+            return "Format checker {0!r} not found.".format(schema["format"])
+
+    return missing_format
 
 
-def get_tests(version):
-    for filepath, group_list in load_jsons(version):
-        for group in group_list:
-            schema = group["schema"]
-            for test in group["tests"]:
-                instance = test["data"]
-                is_valid = test["valid"]
-                yield (
-                    filepath,
-                    group["description"],
-                    test["description"],
-                    schema,
-                    instance,
-                    is_valid,
-                )
+is_narrow_build = sys.maxunicode == 2 ** 16 - 1
+if is_narrow_build:  # pragma: no cover
+    narrow_unicode_build = skip_tests_containing_descriptions(
+        maxLength={
+            "supplementary Unicode": "Not running surrogate Unicode case, this Python is narrow."
+        },
+        minLength={
+            "supplementary Unicode": "Not running surrogate Unicode case, this Python is narrow."
+        },
+    )
+else:
+
+    def narrow_unicode_build(test):  # pragma: no cover
+        return
 
 
-def get_remote_schemas():
-    remote_schemas = {
-        "http://localhost:1234/{}".format(json_name): json_content
-        for json_name, json_content in load_remote_schemas()
-    }
-    return remote_schemas
+TestDraft3 = DRAFT3.to_unittest_testcase(
+    DRAFT3.tests(),
+    DRAFT3.optional_tests_of(name="format"),
+    DRAFT3.optional_tests_of(name="bignum"),
+    DRAFT3.optional_tests_of(name="zeroTerminatedFloats"),
+    Validator=Draft3Validator,
+    format_checker=draft3_format_checker,
+    skip=lambda test: (
+        narrow_unicode_build(test)
+        or missing_format(draft3_format_checker)(test)
+        or skip_tests_containing_descriptions(
+            format={"case-insensitive T and Z": "Upstream bug in strict_rfc3339"}
+        )(test)
+    ),
+)
 
 
-class JsonschemaTestCase(unittest.TestCase):
-    def setUp(self):
-        download_suite()
+TestDraft4 = DRAFT4.to_unittest_testcase(
+    DRAFT4.tests(),
+    DRAFT4.optional_tests_of(name="format"),
+    DRAFT4.optional_tests_of(name="bignum"),
+    DRAFT4.optional_tests_of(name="zeroTerminatedFloats"),
+    Validator=Draft4Validator,
+    format_checker=draft4_format_checker,
+    skip=lambda test: (
+        narrow_unicode_build(test)
+        or missing_format(draft4_format_checker)(test)
+        or skip_tests_containing_descriptions(
+            format={"case-insensitive T and Z": "Upstream bug in strict_rfc3339"},
+            ref={"valid tree": "An actual bug, this needs fixing."},
+            refRemote={
+                "number is valid": "An actual bug, this needs fixing.",
+                "string is invalid": "An actual bug, this needs fixing.",
+            },
+        )(test)
+    ),
+)
 
-    def run_test_cases(self, version):
-        remote_schemas = get_remote_schemas()
 
-        for (
-            filepath,
-            group_description,
-            test_description,
-            schema,
-            instance,
-            is_valid,
-        ) in get_tests(version):
-            test_info = textwrap.indent(
-                textwrap.dedent(
-                    """
-                    {}
-                    {}
-                    {}
-                    schema = {}
-                    instance = {}
-                    correct_answer = {}
-                    """
-                ).format(
-                    filepath,
-                    group_description,
-                    test_description,
-                    json.dumps(schema, indent=4),
-                    json.dumps(instance, indent=4),
-                    is_valid,
-                ),
-                " " * 4,
-            )
-            with self.subTest(test_info):
-                s = jsonschemax.compile(schema, remote_schemas=remote_schemas)
-                self.assertEqual(s(instance), is_valid)
+TestDraft6 = DRAFT6.to_unittest_testcase(
+    DRAFT6.tests(),
+    DRAFT6.optional_tests_of(name="format"),
+    DRAFT6.optional_tests_of(name="bignum"),
+    DRAFT6.optional_tests_of(name="zeroTerminatedFloats"),
+    Validator=Draft6Validator,
+    format_checker=draft6_format_checker,
+    skip=lambda test: (
+        narrow_unicode_build(test)
+        or missing_format(draft6_format_checker)(test)
+        or skip_tests_containing_descriptions(
+            format={"case-insensitive T and Z": "Upstream bug in strict_rfc3339"},
+            ref={"valid tree": "An actual bug, this needs fixing."},
+            refRemote={
+                "number is valid": "An actual bug, this needs fixing.",
+                "string is invalid": "An actual bug, this needs fixing.",
+            },
+        )(test)
+    ),
+)
 
-    # def test_draft6(self):
-    #     self.run_test_cases(version="draft6", validator=jsonschemax.draft6_validator)
 
-    def test_draft7(self):
-        self.run_test_cases(version="draft7")
+TestDraft7 = DRAFT7.to_unittest_testcase(
+    DRAFT7.tests(),
+    DRAFT7.format_tests(),
+    DRAFT7.optional_tests_of(name="bignum"),
+    DRAFT7.optional_tests_of(name="zeroTerminatedFloats"),
+    Validator=Draft7Validator,
+    format_checker=draft7_format_checker,
+    skip=lambda test: (
+        narrow_unicode_build(test)
+        or missing_format(draft7_format_checker)(test)
+        or skip_tests_containing_descriptions(
+            ref={"valid tree": "An actual bug, this needs fixing."},
+            refRemote={
+                "number is valid": "An actual bug, this needs fixing.",
+                "string is invalid": "An actual bug, this needs fixing.",
+            },
+        )(test)
+        or skip_tests_containing_descriptions(
+            **{
+                "date-time": {
+                    "case-insensitive T and Z": "Upstream bug in strict_rfc3339"
+                }
+            }
+        )(test)
+    ),
+)
+
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", DeprecationWarning)
+
+    TestDraft3LegacyTypeCheck = DRAFT3.to_unittest_testcase(
+        # Interestingly the any part couldn't really be done w/the old API.
+        (
+            (test for test in each if test.schema != {"type": "any"})
+            for each in DRAFT3.tests_of(name="type")
+        ),
+        name="TestDraft3LegacyTypeCheck",
+        Validator=create(
+            meta_schema=Draft3Validator.META_SCHEMA,
+            validators=Draft3Validator.VALIDATORS,
+            default_types=_DEPRECATED_DEFAULT_TYPES,
+        ),
+    )
+
+    TestDraft4LegacyTypeCheck = DRAFT4.to_unittest_testcase(
+        DRAFT4.tests_of(name="type"),
+        name="TestDraft4LegacyTypeCheck",
+        Validator=create(
+            meta_schema=Draft4Validator.META_SCHEMA,
+            validators=Draft4Validator.VALIDATORS,
+            default_types=_DEPRECATED_DEFAULT_TYPES,
+        ),
+    )
