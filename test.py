@@ -1,5 +1,8 @@
+#!/usr/local/bin/python3
+
+
 def main():
-    pass
+    assert 1 == 1
 
 
 if __name__ == "__main__":
